@@ -106,6 +106,20 @@ Em nome de **marcador**:
     [ts:7/8]           só a fórmula, mantendo o tempo
     [bpm:140 lin]      rampa até o ponto seguinte
 
+E para escolher o **formato de render**, que o MCP também não alcança:
+
+    [render:wav]              WAV 24 bits, 48 kHz
+    [render:wav 16 44.1]      outra profundidade e taxa
+    [render:wav stems]        o mesmo, saindo em stems
+    [render:mp3-320]          um preset guardado
+    [render:capturar nome]    guarda a configuração atual da janela de render
+
+O WAV a ponte monta na hora, em qualquer profundidade: o bloco de formato é só `evaw` mais o byte
+da profundidade, e tem um codificador base64 escrito em Lua ali dentro, porque o REAPER não traz
+um. Os formatos com codec, como MP3, vêm de preset: você configura uma vez na janela Render to
+File, clica em **Save settings**, e guarda com `[render:capturar <nome>]`. Inventar a configuração
+do LAME na mão dá arquivo corrompido.
+
 Tudo roda dentro de `pcall` e grava erro em `claude_console/ponte_erro.log`, legível de fora do
 REAPER. Isso não é frescura: **um erro de Lua num script disparado pelo MCP derruba o bridge
 junto**, e aí o REAPER continua aberto mas fica mudo para todas as ferramentas.

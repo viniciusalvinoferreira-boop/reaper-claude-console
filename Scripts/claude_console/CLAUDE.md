@@ -85,6 +85,51 @@ seguinte. Isso foi medido. Leia `get_tempo` para dizer onde o ponto caiu de fato
 de 120 para 95 bpm moveu um marcador de 8,0s para 10,1s sozinho. Monte o mapa de tempo **primeiro**
 e os marcadores de estrutura **depois**.
 
+## Render: formato e caminho
+
+O `render_project` já recebe **o caminho completo de saída**, o trecho e a cauda de reverb. Então
+"renderiza e salva em tal pasta" é uma chamada só.
+
+**O que ele não escolhe é o formato.** Profundidade, taxa, WAV ou MP3, master ou stems: tudo isso
+vive nas configurações do projeto. Para mudar, use a ponte:
+
+1. `add_marker` com o nome `[render:<pedido>]`
+2. rode a action da ponte pelo Command ID
+3. `render_project` com o caminho pedido
+
+O marcador some sozinho quando a ponte cumpre o pedido. Se continuar lá, não deu.
+
+| Pedido | Etiqueta |
+|---|---|
+| "renderiza em WAV" | `[render:wav]` (sai 24 bits, 48 kHz) |
+| "WAV 16 bits, 44.1" | `[render:wav 16 44.1]` |
+| "renderiza as stems" | `[render:wav stems]` |
+| "renderiza em MP3 320" | `[render:mp3-320]` |
+
+A ordem das palavras não importa, e o que você não disser fica como está. `master` volta para
+master mix, `mono` e `stereo` mudam os canais.
+
+**WAV a ponte monta sozinha**, em qualquer profundidade, porque o bloco de formato do WAV é só
+`evaw` mais o byte da profundidade. **Os outros formatos têm configuração de codec e vêm de
+preset**: o nome na etiqueta é o nome do preset guardado. Para guardar um, configure na janela
+Render to File, clique em **Save settings**, e rode `[render:capturar <nome>]`.
+
+**O preset guarda tudo que está na janela**, não só o formato: source, taxa, canais, bounds e
+cauda. Capture o preset de MP3 com o Source em `Master mix`, senão todo MP3 vai sair em stems.
+
+**Stems depende da seleção.** `Selected tracks (stems)` renderiza as faixas **selecionadas**, não
+todas. Selecione antes de renderizar.
+
+### Conferir o resultado
+
+`render_project` responde com `silent`, `peak_dbfs` e `sound_starts_s`. **Se vier `silent: true`,
+não diga que renderizou:** o arquivo saiu mudo. O motivo mais comum é faixa sem master send.
+
+**Faixa nova pode nascer sem master send**, dependendo do projeto, e isso já fez um render sair
+mudo. Quando criar faixa que precisa ser ouvida ou renderizada, confira com
+`get_track_master_send`. As faixas de monitoração são a exceção: elas ficam fora do master de
+propósito.
+
 ## "Aqui", "nesse ponto", "a partir daqui"
 
 Quando ele deixa o cursor no lugar e fala "aqui", isso é uma posição, e você sabe ler:

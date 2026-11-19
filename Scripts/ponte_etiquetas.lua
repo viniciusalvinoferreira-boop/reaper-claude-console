@@ -37,12 +37,14 @@ local CATEGORIA_HWOUT = 1   -- categoria 1 = hardware outputs
 local LIMITE = 20000        -- trava: loop infinito aqui congelaria o REAPER
 local NL = string.char(10)
 local LOG = reaper.GetResourcePath() .. '/Scripts/claude_console/ponte_erro.log'
+local PRESETS = reaper.GetResourcePath() .. '/Scripts/claude_console/render_presets.ini'
 
 local DEBUG = reaper.GetResourcePath() .. '/Scripts/claude_console/ponte_debug.log'
 local VERSAO = 'v4-qn'
 
 local criadas = 0
 local pontos = 0
+local renders = 0
 local erros = {}
 local diag = {'versao: ' .. VERSAO}
 
@@ -215,6 +217,222 @@ local function tempos_pelos_marcadores()
 end
 
 ------------------------------------------------------------------------------
+-- 3) Render: guardar e aplicar presets, pelo nome do marcador
+------------------------------------------------------------------------------
+
+-- O MCP renderiza, mas nao escolhe o FORMATO: profundidade, taxa, MP3 ou WAV,
+-- master ou stems, tudo isso vive nas configuracoes do projeto. E o formato em
+-- si e um blob que o REAPER guarda em base64 (para WAV, "evaw" mais a
+-- profundidade em bits; para MP3, a configuracao do LAME). Inventar esse blob
+-- na mao da arquivo corrompido, entao a ponte faz o contrario: CAPTURA o que
+-- esta configurado na janela Render to File e guarda com um nome.
+--
+--   [render:capturar mp3-320]   guarda a configuracao atual com esse nome
+--   [render:mp3-320]            aplica a configuracao guardada
+--
+-- Depois de aplicar, quem renderiza e o MCP (render_project), que ja recebe o
+-- caminho de saida no proprio comando.
+
+local CAMPOS_NUM = {
+  'RENDER_SRATE', 'RENDER_CHANNELS', 'RENDER_SETTINGS',
+  'RENDER_BOUNDSFLAG', 'RENDER_TAILFLAG', 'RENDER_TAILMS',
+}
+
+local function ler_presets()
+  local t = {}
+  local fh = io.open(PRESETS, 'rb')
+  if not fh then return t end
+  local atual = nil
+  for linha in fh:lines() do
+    linha = linha:gsub('%s+$', '')
+    local nome = linha:match('^%[(.+)%]$')
+    if nome then
+      atual = nome:lower()
+      t[atual] = {}
+    elseif atual then
+      local k, v = linha:match('^(%w+)=(.*)$')
+      if k then t[atual][k] = v end
+    end
+  end
+  fh:close()
+  return t
+end
+
+local function gravar_presets(t)
+  local fh = io.open(PRESETS, 'wb')
+  if not fh then return false end
+  fh:write('; Presets de render capturados da janela Render to File.' .. NL)
+  fh:write('; Aplique criando um marcador chamado [render:<nome>] e rodando a ponte.' .. NL)
+  for nome, campos in pairs(t) do
+    fh:write(NL .. '[' .. nome .. ']' .. NL)
+    fh:write('FORMAT=' .. tostring(campos.FORMAT or '') .. NL)
+    for _, c in ipairs(CAMPOS_NUM) do
+      fh:write(c .. '=' .. tostring(campos[c] or '') .. NL)
+    end
+  end
+  fh:close()
+  return true
+end
+
+local function capturar_preset(nome)
+  local ok, fmt = reaper.GetSetProjectInfo_String(0, 'RENDER_FORMAT', '', false)
+  if not ok or not fmt or fmt == '' then
+    return false, 'nao consegui ler o formato de render do projeto'
+  end
+  local campos = { FORMAT = fmt }
+  for _, c in ipairs(CAMPOS_NUM) do
+    campos[c] = tostring(reaper.GetSetProjectInfo(0, c, 0, false))
+  end
+  local t = ler_presets()
+  t[nome:lower()] = campos
+  if not gravar_presets(t) then return false, 'nao consegui gravar ' .. PRESETS end
+  return true
+end
+
+local function aplicar_preset(nome)
+  local campos = ler_presets()[nome:lower()]
+  if not campos then
+    return false, 'preset "' .. nome .. '" nao existe em render_presets.ini'
+  end
+  if campos.FORMAT and campos.FORMAT ~= '' then
+    reaper.GetSetProjectInfo_String(0, 'RENDER_FORMAT', campos.FORMAT, true)
+  end
+  for _, c in ipairs(CAMPOS_NUM) do
+    local v = tonumber(campos[c])
+    if v then reaper.GetSetProjectInfo(0, c, v, true) end
+  end
+  return true
+end
+
+-- base64 na mao: o Lua do REAPER nao traz um, e o blob do formato e base64
+local B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+local function base64(dados)
+  local saida = {}
+  for i = 1, #dados, 3 do
+    local a, b, c = dados:byte(i, i + 2)
+    local n = a * 65536 + (b or 0) * 256 + (c or 0)
+    local c1 = math.floor(n / 262144) % 64
+    local c2 = math.floor(n / 4096) % 64
+    local c3 = math.floor(n / 64) % 64
+    local c4 = n % 64
+    saida[#saida + 1] = B64:sub(c1 + 1, c1 + 1) .. B64:sub(c2 + 1, c2 + 1)
+      .. (b and B64:sub(c3 + 1, c3 + 1) or '=')
+      .. (c and B64:sub(c4 + 1, c4 + 1) or '=')
+  end
+  return table.concat(saida)
+end
+
+-- O blob do WAV e curto e legivel: "evaw" (wave ao contrario), a profundidade
+-- em bits, e duas flags. Conferido decodificando o que o REAPER gravou.
+-- Por isso WAV a ponte MONTA na hora, em qualquer profundidade, sem precisar
+-- de preset nenhum. MP3 e os outros tem configuracao de codec e vem de preset.
+local function blob_wav(bits)
+  return base64('evaw' .. string.char(bits) .. string.char(0) .. string.char(1))
+end
+
+-- aceita 48, 48000, 44.1, 44100 e devolve sempre em Hz
+local function normalizar_srate(n)
+  if not n then return nil end
+  if n < 500 then return math.floor(n * 1000 + 0.5) end
+  return math.floor(n + 0.5)
+end
+
+-- Monta a configuracao de render a partir do que foi pedido, em palavras:
+--   wav 24 48            WAV 24 bits, 48 kHz
+--   wav 16 44.1 stems    WAV 16 bits, 44,1 kHz, saindo em stems
+--   mp3-320              aplica o preset guardado com esse nome
+--   mp3-320 48 stems     o preset, mas em 48 kHz e em stems
+-- A ordem das palavras nao importa, e o que nao for dito fica como esta.
+local function montar_render(corpo)
+  local palavras = {}
+  for p in corpo:gmatch('%S+') do palavras[#palavras + 1] = p end
+
+  local tipo = (palavras[1] or ''):lower()
+  local bits, srate, stems, canais
+
+  for i = 2, #palavras do
+    local p = palavras[i]:lower()
+    local n = tonumber(p)
+    if p == 'stems' then stems = true
+    elseif p == 'master' then stems = false
+    elseif p == 'mono' then canais = 1
+    elseif p == 'stereo' or p == 'estereo' then canais = 2
+    elseif n then
+      -- 8, 16, 24 e 32 so fazem sentido como profundidade; o resto e taxa
+      if n == 8 or n == 16 or n == 24 or n == 32 then bits = n else srate = normalizar_srate(n) end
+    end
+  end
+
+  if tipo == 'wav' then
+    -- Sem dizer profundidade nem taxa, sai 24 bits e 48 kHz, que e o padrao
+    -- de trabalho mais comum. Os numeros na etiqueta existem para quando voce
+    -- quiser outra coisa (16 bits e 44,1 kHz para CD, por exemplo).
+    reaper.GetSetProjectInfo_String(0, 'RENDER_FORMAT', blob_wav(bits or 24), true)
+    if not srate then srate = 48000 end
+  else
+    local ok, err = aplicar_preset(tipo)
+    if not ok then return false, err end
+  end
+
+  if srate  then reaper.GetSetProjectInfo(0, 'RENDER_SRATE', srate, true) end
+  if canais then reaper.GetSetProjectInfo(0, 'RENDER_CHANNELS', canais, true) end
+
+  if stems == true then
+    -- o codigo de "master mix and stems" nao da pra inventar: ele vem de uma
+    -- captura feita com essa opcao marcada na janela de render
+    local p = ler_presets()['stems']
+    local v = p and tonumber(p.RENDER_SETTINGS)
+    if not v then
+      return false, 'ainda nao sei o codigo de stems: marque "Master mix and stems" na janela de render, clique Save settings e rode [render:capturar stems]'
+    end
+    reaper.GetSetProjectInfo(0, 'RENDER_SETTINGS', v, true)
+  elseif stems == false then
+    reaper.GetSetProjectInfo(0, 'RENDER_SETTINGS', 0, true)
+  end
+
+  return true
+end
+
+local function render_pelos_marcadores()
+  local alvos = {}
+  local idx = 0
+  while idx < LIMITE do
+    local ok, isrgn, _, _, nome, num_marcador = reaper.EnumProjectMarkers(idx)
+    if not ok or ok == 0 then break end
+    if not isrgn and nome then
+      local corpo = nome:match('%[[Rr][Ee][Nn][Dd][Ee][Rr]:([^%]]+)%]')
+      if corpo then
+        alvos[#alvos + 1] = { corpo = corpo, marcador = num_marcador, nome = nome }
+      end
+    end
+    idx = idx + 1
+  end
+
+  for _, a in ipairs(alvos) do
+    local primeira, resto = a.corpo:match('^%s*(%S+)%s*(.-)%s*$')
+    local ok, err
+    if primeira and primeira:lower() == 'capturar' then
+      if not resto or resto == '' then
+        ok, err = false, 'faltou o nome: use [render:capturar <nome>]'
+      else
+        ok, err = capturar_preset(resto)
+      end
+    else
+      ok, err = montar_render(a.corpo)
+    end
+
+    if ok then
+      renders = renders + 1
+      -- o marcador era so o recado, some depois de cumprido
+      reaper.DeleteProjectMarker(0, a.marcador, false)
+    else
+      erros[#erros + 1] = a.nome .. ': ' .. tostring(err)
+    end
+  end
+end
+
+------------------------------------------------------------------------------
 -- Execucao protegida
 ------------------------------------------------------------------------------
 
@@ -222,6 +440,7 @@ reaper.Undo_BeginBlock()
 
 local ok1, err1 = pcall(saidas_de_hardware)
 local ok2, err2 = pcall(tempos_pelos_marcadores)
+local ok3, err3 = pcall(render_pelos_marcadores)
 
 if pontos > 0 then reaper.UpdateTimeline() end
 
@@ -229,6 +448,7 @@ reaper.Undo_EndBlock('MCP: ponte de etiquetas (saidas de hardware e tempo)', -1)
 
 if not ok1 then erros[#erros + 1] = 'ERRO DE SCRIPT em saidas: ' .. tostring(err1) end
 if not ok2 then erros[#erros + 1] = 'ERRO DE SCRIPT em tempo: ' .. tostring(err2) end
+if not ok3 then erros[#erros + 1] = 'ERRO DE SCRIPT em render: ' .. tostring(err3) end
 
 -- Diario de bordo, sempre. Serve para provar qual VERSAO do arquivo o REAPER
 -- acabou de rodar, e com que numeros. Sem isso nao da para distinguir "o
