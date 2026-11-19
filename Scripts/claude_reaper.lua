@@ -257,6 +257,51 @@ local function add(papel, texto)
   log[#log + 1] = { papel = papel, texto = texto }
 end
 
+-- O InputTextMultiline do ImGui NAO quebra linha: ele rola pro lado, e ler a
+-- resposta virava esticar a janela inteira. Trocar por texto comum resolveria
+-- a quebra, mas tiraria o Ctrl+C do historico. Entao a quebra e feita aqui, na
+-- largura atual da janela, e o texto continua numa caixa selecionavel.
+--
+-- O resultado fica em cache: so recalcula quando o texto ou a largura mudam,
+-- senao seria uma varredura de string a cada frame.
+local cache_quebra = { largura = -1, origem = nil, saida = '' }
+
+local function quebrar(ctx, texto, largura)
+  -- versao de ReaImGui sem medida de texto: devolve como estava, sem quebrar.
+  -- Melhor rolar pro lado do que a janela nao abrir.
+  if not reaper.ImGui_CalcTextSize then return texto end
+
+  if cache_quebra.largura == largura and cache_quebra.origem == texto then
+    return cache_quebra.saida
+  end
+
+  local NL = string.char(10)
+  local saida = {}
+
+  for linha in (texto .. NL):gmatch('([^' .. NL .. ']*)' .. NL) do
+    if linha == '' then
+      saida[#saida + 1] = ''
+    else
+      local atual = ''
+      for palavra in linha:gmatch('%S+') do
+        local teste = (atual == '') and palavra or (atual .. ' ' .. palavra)
+        local w = reaper.ImGui_CalcTextSize(ctx, teste)
+        if w > largura and atual ~= '' then
+          saida[#saida + 1] = atual
+          atual = palavra
+        else
+          atual = teste
+        end
+      end
+      saida[#saida + 1] = atual
+    end
+  end
+
+  local resultado = table.concat(saida, NL)
+  cache_quebra = { largura = largura, origem = texto, saida = resultado }
+  return resultado
+end
+
 ------------------------------------------------------------------ envio
 
 local function enviar(prompt)
@@ -593,8 +638,19 @@ local function desenhar()
   reaper.ImGui_Separator(ctx)
 
   -- historico em caixa somente-leitura: da pra selecionar e copiar com Ctrl+C,
-  -- o que nao era possivel quando era texto desenhado na tela
-  reaper.ImGui_InputTextMultiline(ctx, '##historico', historico_txt(), -1, -1, FLAGS_LEITURA)
+  -- o que nao era possivel quando era texto desenhado na tela.
+  -- O texto vai quebrado na largura da janela, senao a caixa rola pro lado e
+  -- so da pra ler esticando o REAPER inteiro.
+  local largura = 420
+  if reaper.ImGui_GetContentRegionAvail then
+    local disp = reaper.ImGui_GetContentRegionAvail(ctx)
+    -- desconta a barra de rolagem e o respiro interno da caixa
+    if disp then largura = disp - 28 end
+  end
+  if largura < 120 then largura = 120 end
+  reaper.ImGui_InputTextMultiline(ctx, '##historico',
+                                  quebrar(ctx, historico_txt(), largura),
+                                  -1, -1, FLAGS_LEITURA)
 
   reaper.ImGui_End(ctx)
   return open
