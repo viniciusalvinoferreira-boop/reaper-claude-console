@@ -11,19 +11,89 @@
 ------------------------------------------------------------------ config
 
 local BS       = string.char(92)  -- barra invertida literal, imune a escape no fonte
-local CLAUDE   = (os.getenv('APPDATA') or '') .. BS .. 'npm' .. BS .. 'claude.cmd'
 local DIR      = reaper.GetResourcePath() .. '/Scripts/claude_console/'
 local DIR_WIN  = DIR:gsub('/', BS)
 local TIMEOUT  = 1800  -- 30 min. so existe pra nao ficar preso pra sempre se algo morrer
 
--- Modelo. Medido: a mesma pergunta com uma leitura do projeto levou 8667 ms
--- no modelo padrao da conta e 6157 ms no haiku, 29% a menos, com a mesma
--- resposta. Num comando maior (criar faixa com dois plugins) a diferenca foi
--- de 20233 ms para 11606 ms, 43% a menos.
--- Comando do dia a dia e curto e objetivo, entao haiku e o padrao daqui.
+-- Qual CLI de IA a janela usa. O REAPER, o bridge do MCP e a ponte de
+-- etiquetas sao agnosticos: so a janela sabe quem ela chama. Trocar de motor e
+-- trocar esta linha, desde que exista uma entrada com esse nome em `motores`.
+local MOTOR = 'claude'
+
+-- Modelo. Medido com Claude Code: a mesma pergunta com uma leitura do projeto
+-- levou 8667 ms no modelo padrao da conta e 6157 ms no haiku, 29% a menos,
+-- com a mesma resposta.
+-- Comando do dia a dia e curto e objetivo, entao o rapido e o padrao daqui.
 -- Para usar o modelo forte numa mensagem, comece ela com "!".
-local MODELO       = 'haiku'
-local MODELO_FORTE = ''      -- vazio = padrao da conta
+-- Vazio em qualquer um dos dois = o padrao da conta naquele motor.
+local MODELO       = nil   -- nil = usa o modelo rapido do motor
+local MODELO_FORTE = nil   -- nil = usa o modelo forte do motor
+
+-- Declarados aqui e definidos mais abaixo. Os motores usam estas duas, e elas
+-- so existem depois; em Lua basta a variavel local ja existir quando a funcao
+-- que a usa for ESCRITA, porque a chamada acontece em tempo de execucao.
+local decodificar, extrai_result
+
+------------------------------------------------------------------ motores
+
+-- Tudo que e especifico de uma CLI mora aqui dentro. O resto da janela so
+-- conhece eventos neutros:
+--   {tipo='pronto'}                sessao iniciada, ja da sinal de vida
+--   {tipo='tool',  nome='...'}     comecou a usar uma ferramenta
+--   {tipo='texto', texto='...'}    pedaco da resposta chegando
+--   {tipo='fim',   texto='...'}    acabou, com o texto final
+--   {tipo='erro',  texto='...'}    deu ruim, com o motivo
+--
+-- Para plugar outro motor, acrescente uma entrada com os mesmos campos. Nada
+-- fora desta secao precisa saber qual CLI esta rodando.
+
+local motores = {}
+
+motores.claude = {
+  nome          = 'Claude Code',
+  exe           = (os.getenv('APPDATA') or '') .. BS .. 'npm' .. BS .. 'claude.cmd',
+  dica          = 'Instale com: npm install -g @anthropic-ai/claude-code',
+  modelo_rapido = 'haiku',
+  modelo_forte  = '',      -- vazio = o padrao da conta
+
+  -- --strict-mcp-config + --mcp-config: carrega SO o servidor do REAPER. Sem
+  -- isso, cada chamada sobe todos os MCP da conta e perde dezenas de segundos.
+  -- --include-partial-messages: manda os pedacos do texto conforme saem.
+  montar_comando = function(self, modelo, continuar)
+    local m = (modelo and modelo ~= '') and (' --model ' .. modelo) or ''
+    local c = continuar and ' --continue' or ''
+    return 'call "' .. self.exe .. '" -p --output-format stream-json --verbose'
+        .. ' --include-partial-messages --mcp-config "mcp-reaper.json"'
+        .. ' --strict-mcp-config --allowedTools "mcp__reaper" "Skill"'
+        .. m .. c .. ' < "prompt.txt" > "out.txt" 2>&1'
+  end,
+
+  traduzir = function(self, linha)
+    if linha:find('"subtype":"init"', 1, true) then
+      return { tipo = 'pronto' }
+    end
+    if linha:find('"type":"tool_use"', 1, true) then
+      local nome = linha:match('"name":"([%w_]+)"')
+      if nome then return { tipo = 'tool', nome = nome } end
+      return nil
+    end
+    local i = linha:find('"text_delta"', 1, true)
+    if i then
+      local k = linha:find('"text":"', i, true)
+      if k then
+        local pedaco = decodificar(linha, k + 8)
+        if pedaco then return { tipo = 'texto', texto = pedaco } end
+      end
+      return nil
+    end
+    if linha:find('"type":"result"', 1, true) then
+      return { tipo = 'fim', texto = extrai_result(linha) }
+    end
+    return nil
+  end,
+}
+
+local motor = motores[MOTOR]
 
 ------------------------------------------------------------------ checagens
 
@@ -33,10 +103,17 @@ if not reaper.ImGui_CreateContext then
   return
 end
 
-local f = io.open(CLAUDE, 'r')
+if not motor then
+  reaper.MB('Motor "' .. tostring(MOTOR) .. '" nao existe neste script.\n\n' ..
+            'Ajuste a variavel MOTOR no topo.', 'Claude REAPER', 0)
+  return
+end
+
+local f = io.open(motor.exe, 'r')
 if f then f:close() else
-  reaper.MB('CLI do Claude nao encontrado em:\n' .. CLAUDE ..
-            '\n\nAjuste a variavel CLAUDE no topo do script.', 'Claude REAPER', 0)
+  reaper.MB('CLI do ' .. motor.nome .. ' nao encontrada em:\n' .. motor.exe ..
+            '\n\n' .. (motor.dica or '') ..
+            '\n\nOu ajuste o campo exe do motor, no topo do script.', 'Claude REAPER', 0)
   return
 end
 
@@ -189,12 +266,13 @@ local function enviar(prompt)
   os.remove(DIR .. 'out.txt')
 
   -- "!" no comeco da mensagem manda no modelo forte. O "!" nao vai no prompt.
-  local escolhido = MODELO
+  local escolhido = MODELO or motor.modelo_rapido
   if prompt:sub(1, 1) == '!' then
-    escolhido = MODELO_FORTE
+    escolhido = MODELO_FORTE or motor.modelo_forte
     prompt = prompt:sub(2):gsub('^%s+', '')
     if prompt == '' then return end
   end
+  escolhido = escolhido or ''
   modelo_usado = (escolhido ~= '') and escolhido or 'padrao'
 
   if not write_file(DIR .. 'prompt.txt', prompt) then
@@ -202,21 +280,16 @@ local function enviar(prompt)
     return
   end
 
-  local cont = nova and '' or ' --continue'
-  local modelo = (escolhido ~= '' ) and (' --model ' .. escolhido) or ''
   local bat = table.concat({
     '@echo off',
     'chcp 65001 >nul',
     -- sem a barra final: no cmd, barra antes de aspa escapa a aspa
     'cd /d "' .. DIR_WIN:sub(1, -2) .. '"',
-    -- 'call' e obrigatorio: sem ele, chamar um .cmd de dentro de um .bat
-    -- entrega o controle e nunca volta, e a done.flag nao seria escrita
-    -- --strict-mcp-config + --mcp-config: carrega SO o servidor do REAPER.
-    -- sem isso, cada chamada sobe todos os MCP da conta (Gmail, Drive, Docs,
-    -- Calendar, Playwright via npx) e perde dezenas de segundos antes de comecar.
-    -- --include-partial-messages: manda os pedacos do texto conforme saem, em
-    -- vez de so o bloco final. E o que faz a resposta aparecer escrevendo.
-    'call "' .. CLAUDE .. '" -p --output-format stream-json --verbose --include-partial-messages --mcp-config "mcp-reaper.json" --strict-mcp-config --allowedTools "mcp__reaper" "Skill"' .. modelo .. cont .. ' < "prompt.txt" > "out.txt" 2>&1',
+    -- quem monta a linha e o motor: a janela nao sabe as flags de ninguem.
+    -- 'call' e obrigatorio e por isso mora aqui: sem ele, chamar um .cmd de
+    -- dentro de um .bat entrega o controle e nunca volta, e a done.flag nunca
+    -- seria escrita.
+    motor:montar_comando(escolhido, not nova),
     'echo done> "done.flag"',
   }, '\r\n') .. '\r\n'
 
@@ -248,7 +321,9 @@ end
 --   "result":"..."             -> o texto final, quando termina
 -- Nao da pra usar match simples no result: ele tem aspas e quebras escapadas,
 -- entao percorro caractere a caractere ate a aspa nao escapada.
-local function decodificar(txt, j)
+-- sem "local": atribui a variavel local declarada la no topo, que os motores
+-- ja capturaram. Se levar "local" aqui, vira outra variavel e eles veem nil.
+function decodificar(txt, j)
   local buf = {}
   while j <= #txt do
     local c = txt:sub(j, j)
@@ -274,7 +349,7 @@ local function decodificar(txt, j)
 end
 
 -- a ULTIMA ocorrencia da marca: o evento final e a ultima linha do stream
-local function extrai_result(txt)
+function extrai_result(txt)
   local marca = '"result":"'
   local i, pos = nil, 1
   while true do
@@ -337,49 +412,44 @@ local function finalizar(texto)
   os.remove(DIR .. 'done.flag')
 end
 
--- devolve true quando a conversa terminou nesta linha
+-- Traduz a linha pelo motor e reage ao evento neutro. Daqui pra baixo a janela
+-- nao sabe mais com qual CLI esta falando.
+-- Devolve true quando a conversa terminou nesta linha.
 local function processar_linha(linha)
   if linha == '' then return false end
 
-  -- sessao pronta: ja da pra dizer que saiu do lugar
-  if linha:find('"subtype":"init"', 1, true) then
+  local ok, ev = pcall(motor.traduzir, motor, linha)
+  if not ok or not ev then return false end
+
+  if ev.tipo == 'pronto' then
     status = 'pensando'
-    return false
-  end
 
-  -- comecou a usar uma ferramenta
-  if linha:find('"type":"tool_use"', 1, true) then
-    local nome = linha:match('"name":"([%w_]+)"')
-    if nome then
-      atividade = nome_legivel(nome)
-      status    = 'trabalhando'
-      -- O texto que ele escreve ENTRE uma ferramenta e outra e narracao do
-      -- raciocinio, e costuma sair em ingles ("The project is empty, so...").
-      -- Zerar aqui faz a janela mostrar so o texto que vem DEPOIS da ultima
-      -- ferramenta, que e a resposta de verdade.
-      parcial = ''
-    end
-    return false
-  end
+  elseif ev.tipo == 'tool' then
+    atividade = nome_legivel(ev.nome)
+    status    = 'trabalhando'
+    -- O texto escrito ENTRE uma ferramenta e outra e narracao do raciocinio, e
+    -- costuma sair em ingles ("The project is empty, so..."). Zerar aqui faz a
+    -- janela mostrar so o texto que vem DEPOIS da ultima ferramenta, que e a
+    -- resposta de verdade.
+    parcial = ''
 
-  -- pedaco de texto da resposta
-  local i = linha:find('"text_delta"', 1, true)
-  if i then
-    local k = linha:find('"text":"', i, true)
-    if k then
-      local pedaco = decodificar(linha, k + 8)
-      if pedaco then
-        parcial   = parcial .. pedaco
-        status    = 'escrevendo'
-        atividade = nil
-      end
-    end
-    return false
-  end
+  elseif ev.tipo == 'texto' then
+    parcial   = parcial .. (ev.texto or '')
+    status    = 'escrevendo'
+    atividade = nil
 
-  -- fim: o evento final traz a resposta inteira
-  if linha:find('"type":"result"', 1, true) then
-    finalizar(extrai_result(linha))
+  elseif ev.tipo == 'fim' then
+    finalizar(ev.texto)
+    return true
+
+  elseif ev.tipo == 'erro' then
+    add('erro', ev.texto or 'o motor relatou um erro')
+    busy      = false
+    nova      = false
+    status    = 'erro'
+    atividade = nil
+    parcial   = ''
+    os.remove(DIR .. 'done.flag')
     return true
   end
 
@@ -478,8 +548,10 @@ local function desenhar()
     local oque = atividade or status
     reaper.ImGui_Text(ctx, oque .. ' ' .. seg .. 's' .. pontos)
   else
-    local qual = (MODELO ~= '') and MODELO or 'padrao'
-    reaper.ImGui_Text(ctx, status .. '  |  ' .. qual .. ', "!" usa o forte')
+    local qual = MODELO or motor.modelo_rapido
+    if not qual or qual == '' then qual = 'padrao' end
+    reaper.ImGui_Text(ctx, status .. '  |  ' .. motor.nome .. ', ' .. qual ..
+                           ', "!" usa o forte')
   end
 
   reaper.ImGui_Separator(ctx)

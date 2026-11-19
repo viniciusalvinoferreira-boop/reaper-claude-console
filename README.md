@@ -18,7 +18,7 @@ Funciona pela sua assinatura do Claude Code. **Não usa chave de API nem cobra p
 |---|---|
 | `Scripts/claude_reaper.lua` | A janelinha. Janela ImGui dentro do REAPER que chama o Claude Code em modo headless, mostra a resposta e sobe o servidor MCP sozinha quando precisa. |
 | `Scripts/ponte_etiquetas.lua` | A ponte. Faz o que o MCP não expõe: **saída de hardware** e **mudança de tempo e de compasso**, lendo etiquetas que o Claude escreve em nome de faixa e de marcador. |
-| `Scripts/claude_console/CLAUDE.md` | As regras, lidas a cada mensagem. É aqui que você ensina as suas manias. Mudar comportamento é editar texto, não código. |
+| `Scripts/claude_console/AGENTS.md` | As regras, lidas a cada mensagem. É aqui que você ensina as suas manias. Mudar comportamento é editar texto, não código. |
 | `Scripts/claude_console/.claude/skills/setup-voz/` | Exemplo de skill: um checklist completo de setup de gravação de voz. |
 
 ## Requisitos
@@ -41,7 +41,7 @@ Funciona pela sua assinatura do Claude Code. **Não usa chave de API nem cobra p
 
        Scripts/claude_reaper.lua
        Scripts/ponte_etiquetas.lua
-       Scripts/claude_console/CLAUDE.md
+       Scripts/claude_console/AGENTS.md
        Scripts/claude_console/.claude/skills/setup-voz/SKILL.md
 
 3. **Crie o `mcp-reaper.json`** a partir do exemplo, em `Scripts/claude_console/`. Se o `uvx` não
@@ -54,7 +54,7 @@ Funciona pela sua assinatura do Claude Code. **Não usa chave de API nem cobra p
 4. **Registre os dois scripts como actions**: janela `Actions` → `New action` → `Load ReaScript`.
 
 5. **Pegue o Command ID da ponte**: na lista de actions, botão direito no `ponte_etiquetas.lua` →
-   `Copy selected action command ID`. Cole no `CLAUDE.md`, no lugar de `COMMAND_ID_DA_PONTE`.
+   `Copy selected action command ID`. Cole no `AGENTS.md`, no lugar de `COMMAND_ID_DA_PONTE`.
    Sem isso, saída de hardware e mudança de tempo não funcionam.
 
 6. **Para a janelinha abrir junto com o REAPER** (opcional): copie o Command ID do
@@ -132,7 +132,7 @@ junto**, e aí o REAPER continua aberto mas fica mudo para todas as ferramentas.
 - **Dois clientes MCP no mesmo bridge se atropelam.** Se você mandar comando pela janelinha
   enquanto outro cliente trabalha, os dois tomam timeout. Um de cada vez.
 - **`timed out after 5s` não quer dizer que falhou.** Pode ter funcionado. Sempre reler o projeto
-  antes de afirmar qualquer coisa, e é isso que o `CLAUDE.md` manda fazer.
+  antes de afirmar qualquer coisa, e é isso que o `AGENTS.md` manda fazer.
 - **Mudança de tempo cai no início do compasso**, não onde você pediu: o REAPER alinha sozinho.
 - **Marcador está preso ao compasso, não ao segundo.** Mudar o tempo move os marcadores no relógio.
 - **Abrir template precisa do prefixo `template:`** no caminho, senão o REAPER abre o arquivo do
@@ -150,10 +150,60 @@ junto**, e aí o REAPER continua aberto mas fica mudo para todas as ferramentas.
   Mostrar isso na tela confunde: o texto parcial é zerado a cada ferramenta nova, então sobra só
   a resposta final.
 
+## Usando outra IA
+
+O REAPER, o servidor MCP e a ponte de etiquetas **não sabem quem está conversando com eles**. A
+única parte amarrada a uma CLI específica é a janela, e ela foi separada: tudo que é do Claude
+mora numa entrada da tabela `motores`, no topo de `claude_reaper.lua`.
+
+As regras ficam em **`AGENTS.md`**, que é o nome que o Codex usa e que o **Claude Code também lê**
+(testado). Então um arquivo só serve os dois, sem symlink nem cópia.
+
+**Para plugar outro motor**, acrescente uma entrada com estes campos:
+
+```lua
+motores.seumotor = {
+  nome          = 'Nome que aparece na janela',
+  exe           = 'caminho completo da CLI',
+  dica          = 'como instalar, mostrado se a CLI não for encontrada',
+  modelo_rapido = 'alias do modelo rápido',
+  modelo_forte  = '',   -- vazio = o padrão da conta
+
+  -- devolve a linha de comando que escreve JSONL em out.txt, lendo prompt.txt
+  montar_comando = function(self, modelo, continuar) ... end,
+
+  -- recebe UMA linha da saída e devolve um evento neutro, ou nil para ignorar
+  traduzir = function(self, linha) ... end,
+}
+```
+
+E troque `MOTOR` no topo para o nome que você usou.
+
+Os eventos neutros que a janela entende são só cinco:
+
+| Evento | Quando | A janela faz |
+|---|---|---|
+| `{tipo='pronto'}` | sessão iniciada | mostra "pensando" |
+| `{tipo='tool', nome=...}` | começou a usar uma ferramenta | mostra a ação em português |
+| `{tipo='texto', texto=...}` | pedaço da resposta | vai escrevendo na tela |
+| `{tipo='fim', texto=...}` | acabou | grava a resposta no histórico |
+| `{tipo='erro', texto=...}` | deu ruim | mostra o erro e libera a janela |
+
+A tradução roda dentro de `pcall`: se um motor devolver algo inesperado, a linha é ignorada em vez
+de derrubar a janela.
+
+**Status honesto:** o adaptador do **Claude Code está testado e em uso diário**. Codex e Gemini
+**não foram implementados nem testados aqui**, porque não tenho essas CLIs instaladas para validar
+flags e formato de evento, e adaptador escrito no escuro quebra na mão de quem baixa. A estrutura
+está pronta para receber os dois, e o contrato acima é tudo que falta implementar.
+
+Uma observação para quem usa ChatGPT: o aplicativo não controla o REAPER por trás. O caminho é o
+Codex CLI, que roda pela mesma assinatura.
+
 ## Por que as regras ficam em um arquivo de texto
 
 Porque corrigir comportamento vira edição de texto, não programação. Armou uma faixa quando não
-devia? Escreve a regra. Fez o trabalho pela metade? Escreve o checklist. O `CLAUDE.md` deste
+devia? Escreve a regra. Fez o trabalho pela metade? Escreve o checklist. O `AGENTS.md` deste
 repositório é um ponto de partida, e a regra número um dele nasceu de um susto real: **faixa nova
 nasce desarmada**, para não estourar ganho com as caixas abertas.
 
