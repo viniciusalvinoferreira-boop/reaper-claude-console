@@ -12,6 +12,20 @@ você: monta o setup de voz com dois fones
 
 Funciona pela sua assinatura do Claude Code. **Não usa chave de API nem cobra por uso.**
 
+![A janelinha montando um setup de voz e uma mudança de tempo dentro do REAPER](docs/demo.gif)
+
+Na gravação acima, um pedido em português monta o setup inteiro (sete faixas com cor, roteamento
+por send, cadeia de plugins no bus e reverb só nos fones) e depois insere uma mudança de tempo. No
+fim, em destaque, o ponto de tempo que nasceu na régua.
+
+E repare no texto da janela, porque é metade da graça: ele avisa que **a mudança caiu em 16,0 s e
+não em 15 s, porque o REAPER alinha a mudança de tempo ao início do compasso**. Ele não finge que
+fez o que foi pedido ao pé da letra. Isso é regra escrita no `AGENTS.md`, não sorte.
+
+## Como fica na tela
+
+![O projeto montado, com a janelinha dockada na lateral](docs/tela.png)
+
 ## O que tem aqui
 
 | Arquivo | O que faz |
