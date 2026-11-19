@@ -15,7 +15,15 @@ local CLAUDE   = (os.getenv('APPDATA') or '') .. BS .. 'npm' .. BS .. 'claude.cm
 local DIR      = reaper.GetResourcePath() .. '/Scripts/claude_console/'
 local DIR_WIN  = DIR:gsub('/', BS)
 local TIMEOUT  = 1800  -- 30 min. so existe pra nao ficar preso pra sempre se algo morrer
-local MODELO   = ''    -- vazio = padrao da conta. 'haiku' responde bem mais rapido
+
+-- Modelo. Medido: a mesma pergunta com uma leitura do projeto levou 8667 ms
+-- no modelo padrao da conta e 6157 ms no haiku, 29% a menos, com a mesma
+-- resposta. Num comando maior (criar faixa com dois plugins) a diferenca foi
+-- de 20233 ms para 11606 ms, 43% a menos.
+-- Comando do dia a dia e curto e objetivo, entao haiku e o padrao daqui.
+-- Para usar o modelo forte numa mensagem, comece ela com "!".
+local MODELO       = 'haiku'
+local MODELO_FORTE = ''      -- vazio = padrao da conta
 
 ------------------------------------------------------------------ checagens
 
@@ -135,12 +143,18 @@ local busy     = false
 local started  = 0
 local nova     = true      -- proxima chamada comeca conversa nova
 local status   = 'pronto'
-local last_size   = -1    -- pra saber quando o out.txt parou de crescer
 local last_change = 0
 local dock     = false
 local geracao  = 0        -- muda o ID do campo pra forcar o ImGui a largar o buffer
 local focar    = false    -- devolve o cursor pra caixa no frame seguinte
 local atividade = nil     -- ferramenta que ele esta chamando agora
+
+-- streaming: em vez de esperar o fim e mostrar tudo de uma vez, o out.txt e
+-- lido do ponto onde parei e os eventos viram status e texto na tela.
+local stream_pos  = 0     -- quanto do out.txt ja foi processado
+local sobra       = ''    -- ultima linha incompleta, esperando o resto
+local parcial     = ''    -- resposta que esta chegando, pedaco a pedaco
+local modelo_usado = ''   -- qual modelo respondeu a mensagem atual
 
 -- o historico vira UMA string pra caber numa caixa somente-leitura,
 -- que e o que permite selecionar e copiar com Ctrl+C
@@ -153,6 +167,11 @@ local function historico_txt()
     elseif e.papel == 'erro' then prefixo = '[erro] '
     elseif e.papel == 'info' then prefixo = '[info] ' end
     partes[#partes + 1] = prefixo .. e.texto
+  end
+  -- a resposta que esta chegando entra no fim, para a tela se mexer enquanto
+  -- ele escreve em vez de so aparecer tudo no final
+  if busy and parcial ~= '' then
+    partes[#partes + 1] = parcial
   end
   return table.concat(partes, string.char(10) .. string.char(10))
 end
@@ -169,13 +188,22 @@ local function enviar(prompt)
   os.remove(DIR .. 'done.flag')
   os.remove(DIR .. 'out.txt')
 
+  -- "!" no comeco da mensagem manda no modelo forte. O "!" nao vai no prompt.
+  local escolhido = MODELO
+  if prompt:sub(1, 1) == '!' then
+    escolhido = MODELO_FORTE
+    prompt = prompt:sub(2):gsub('^%s+', '')
+    if prompt == '' then return end
+  end
+  modelo_usado = (escolhido ~= '') and escolhido or 'padrao'
+
   if not write_file(DIR .. 'prompt.txt', prompt) then
     add('erro', 'nao consegui escrever em ' .. DIR)
     return
   end
 
   local cont = nova and '' or ' --continue'
-  local modelo = (MODELO ~= '' ) and (' --model ' .. MODELO) or ''
+  local modelo = (escolhido ~= '' ) and (' --model ' .. escolhido) or ''
   local bat = table.concat({
     '@echo off',
     'chcp 65001 >nul',
@@ -186,7 +214,9 @@ local function enviar(prompt)
     -- --strict-mcp-config + --mcp-config: carrega SO o servidor do REAPER.
     -- sem isso, cada chamada sobe todos os MCP da conta (Gmail, Drive, Docs,
     -- Calendar, Playwright via npx) e perde dezenas de segundos antes de comecar.
-    'call "' .. CLAUDE .. '" -p --output-format stream-json --verbose --mcp-config "mcp-reaper.json" --strict-mcp-config --allowedTools "mcp__reaper" "Skill"' .. modelo .. cont .. ' < "prompt.txt" > "out.txt" 2>&1',
+    -- --include-partial-messages: manda os pedacos do texto conforme saem, em
+    -- vez de so o bloco final. E o que faz a resposta aparecer escrevendo.
+    'call "' .. CLAUDE .. '" -p --output-format stream-json --verbose --include-partial-messages --mcp-config "mcp-reaper.json" --strict-mcp-config --allowedTools "mcp__reaper" "Skill"' .. modelo .. cont .. ' < "prompt.txt" > "out.txt" 2>&1',
     'echo done> "done.flag"',
   }, '\r\n') .. '\r\n'
 
@@ -196,11 +226,13 @@ local function enviar(prompt)
   end
 
   add('voce', prompt)
-  last_size   = -1
   last_change = reaper.time_precise()
+  stream_pos  = 0
+  sobra       = ''
+  parcial     = ''
   busy    = true
   started = reaper.time_precise()
-  status  = 'pensando'
+  status  = 'conectando'
   -- roda via .vbs com janela oculta (o 0 no Run): sem terminal piscando na tela.
   -- se o .vbs falhar, cai no cmd normal em vez de nao rodar nada.
   local vbs = 'CreateObject("WScript.Shell").Run "cmd /c ""' .. DIR_WIN .. 'run.bat""", 0, False'
@@ -216,18 +248,7 @@ end
 --   "result":"..."             -> o texto final, quando termina
 -- Nao da pra usar match simples no result: ele tem aspas e quebras escapadas,
 -- entao percorro caractere a caractere ate a aspa nao escapada.
-local function extrai_result(txt)
-  local marca = '"result":"'
-  -- a ULTIMA ocorrencia: o evento final e a ultima linha do stream,
-  -- e pegar a primeira poderia ler o campo de outro evento
-  local i, pos = nil, 1
-  while true do
-    local k = txt:find(marca, pos, true)
-    if not k then break end
-    i, pos = k, k + 1
-  end
-  if not i then return nil end
-  local j = i + #marca
+local function decodificar(txt, j)
   local buf = {}
   while j <= #txt do
     local c = txt:sub(j, j)
@@ -252,46 +273,152 @@ local function extrai_result(txt)
   return nil   -- aspas nao fecharam: ainda esta escrevendo
 end
 
+-- a ULTIMA ocorrencia da marca: o evento final e a ultima linha do stream
+local function extrai_result(txt)
+  local marca = '"result":"'
+  local i, pos = nil, 1
+  while true do
+    local k = txt:find(marca, pos, true)
+    if not k then break end
+    i, pos = k, k + 1
+  end
+  if not i then return nil end
+  return decodificar(txt, i + #marca)
+end
+
+-- Le SO o pedaco do out.txt que ainda nao foi processado. Com
+-- --include-partial-messages o arquivo ganha um evento por pedacinho de texto,
+-- e reparsar o arquivo inteiro a cada frame (dezenas de vezes por segundo)
+-- deixaria a janela pesada justamente quando a resposta e longa.
+local function ler_novo(path, pos)
+  local fh = io.open(path, 'rb')
+  if not fh then return nil, pos end
+  local sz = fh:seek('end')
+  if sz <= pos then fh:close() return '', pos end
+  fh:seek('set', pos)
+  local novo = fh:read('*a') or ''
+  fh:close()
+  return novo, sz
+end
+
+-- nome tecnico de ferramenta vira frase que diz algo pra quem esta olhando
+local TRADUCAO = {
+  ToolSearch = 'procurando a ferramenta',
+  Skill      = 'abrindo a skill',
+}
+
+local function nome_legivel(nome)
+  if TRADUCAO[nome] then return TRADUCAO[nome] end
+  local n = nome:match('^mcp__reaper__(.+)$') or nome
+  if n:match('^get_') or n:match('^measure_') or n:match('^find_') then return 'lendo o projeto' end
+  if n == 'insert_track' then return 'criando faixa' end
+  if n == 'delete_track' then return 'apagando faixa' end
+  if n:match('send') then return 'roteando' end
+  if n:match('^track_fx_') or n:match('^take_fx_') then return 'mexendo nos plugins' end
+  if n:match('^set_eq') then return 'ajustando o EQ' end
+  if n:match('^set_track_') or n:match('^arm_') then return 'ajustando a faixa' end
+  if n:match('midi') then return 'escrevendo MIDI' end
+  if n:match('^run_action') then return 'rodando uma action' end
+  if n:match('marker') or n:match('tempo') or n:match('region') then return 'mexendo no tempo' end
+  if n:match('^open_project') or n:match('^create_project') then return 'abrindo projeto' end
+  return n
+end
+
+local function finalizar(texto)
+  texto = (texto or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if texto == '' then texto = (parcial or ''):gsub('^%s+', ''):gsub('%s+$', '') end
+  if texto == '' then texto = '(resposta vazia)' end
+  add('claude', texto)
+  busy      = false
+  nova      = false
+  status    = 'pronto'
+  atividade = nil
+  parcial   = ''
+  os.remove(DIR .. 'done.flag')
+end
+
+-- devolve true quando a conversa terminou nesta linha
+local function processar_linha(linha)
+  if linha == '' then return false end
+
+  -- sessao pronta: ja da pra dizer que saiu do lugar
+  if linha:find('"subtype":"init"', 1, true) then
+    status = 'pensando'
+    return false
+  end
+
+  -- comecou a usar uma ferramenta
+  if linha:find('"type":"tool_use"', 1, true) then
+    local nome = linha:match('"name":"([%w_]+)"')
+    if nome then
+      atividade = nome_legivel(nome)
+      status    = 'trabalhando'
+      -- O texto que ele escreve ENTRE uma ferramenta e outra e narracao do
+      -- raciocinio, e costuma sair em ingles ("The project is empty, so...").
+      -- Zerar aqui faz a janela mostrar so o texto que vem DEPOIS da ultima
+      -- ferramenta, que e a resposta de verdade.
+      parcial = ''
+    end
+    return false
+  end
+
+  -- pedaco de texto da resposta
+  local i = linha:find('"text_delta"', 1, true)
+  if i then
+    local k = linha:find('"text":"', i, true)
+    if k then
+      local pedaco = decodificar(linha, k + 8)
+      if pedaco then
+        parcial   = parcial .. pedaco
+        status    = 'escrevendo'
+        atividade = nil
+      end
+    end
+    return false
+  end
+
+  -- fim: o evento final traz a resposta inteira
+  if linha:find('"type":"result"', 1, true) then
+    finalizar(extrai_result(linha))
+    return true
+  end
+
+  return false
+end
+
 local function checar_resposta()
   if not busy then return end
 
-  local txt = read_file(DIR .. 'out.txt') or ''
-
-  -- mostra o que ele esta fazendo agora, em vez de so um contador correndo
-  local ult = nil
-  for nome in txt:gmatch('"name":"mcp__reaper__([%a_]+)"') do ult = nome end
-  atividade = ult
-
-  -- fim exato: o evento final traz o texto da resposta
-  local final = extrai_result(txt)
-  if final then
-    final = final:gsub('^%s+', ''):gsub('%s+$', '')
-    if final == '' then final = '(resposta vazia)' end
-    add('claude', final)
-    busy      = false
-    nova      = false
-    status    = 'pronto'
-    atividade = nil
-    os.remove(DIR .. 'done.flag')
-    return
-  end
-
-  -- rede de seguranca: se o processo terminou mas nao achei o evento final,
-  -- mostro a saida crua em vez de deixar a janela pendurada
-  local sz = #txt
-  if sz ~= last_size then
-    last_size   = sz
+  local novo, pos = ler_novo(DIR .. 'out.txt', stream_pos)
+  if novo and novo ~= '' then
+    stream_pos  = pos
     last_change = reaper.time_precise()
+    sobra = sobra .. novo
+    -- processa so linhas inteiras: o pedaco lido pode ter cortado uma no meio
+    while true do
+      local nl = sobra:find(string.char(10), 1, true)
+      if not nl then break end
+      local linha = sobra:sub(1, nl - 1):gsub(string.char(13), '')
+      sobra = sobra:sub(nl + 1)
+      if processar_linha(linha) then return end
+    end
   end
-  local parado = sz > 0 and (reaper.time_precise() - last_change) > 10
+
+  -- rede de seguranca: processo terminou e eu nao vi o evento final
+  local parado = stream_pos > 0 and (reaper.time_precise() - last_change) > 10
   if file_exists(DIR .. 'done.flag') or parado then
-    add('claude', '(nao consegui ler a resposta formatada, saida crua abaixo)'
-        .. string.char(10) .. txt)
-    busy      = false
-    nova      = false
-    status    = 'pronto'
-    atividade = nil
-    os.remove(DIR .. 'done.flag')
+    if parcial ~= '' then
+      finalizar(parcial)
+    else
+      local cru = read_file(DIR .. 'out.txt') or ''
+      add('claude', '(nao consegui ler a resposta formatada, saida crua abaixo)'
+          .. string.char(10) .. cru)
+      busy      = false
+      nova      = false
+      status    = 'pronto'
+      atividade = nil
+      os.remove(DIR .. 'done.flag')
+    end
     return
   end
 
@@ -347,10 +474,12 @@ local function desenhar()
   if busy then
     local pontos = string.rep('.', (math.floor(reaper.time_precise() * 2) % 4))
     local seg = math.floor(reaper.time_precise() - started)
-    local oque = atividade and (' ' .. atividade) or ''
-    reaper.ImGui_Text(ctx, 'pensando ' .. seg .. 's' .. oque .. pontos)
+    -- a atividade (ferramenta) manda no texto; sem ela, mostra a fase
+    local oque = atividade or status
+    reaper.ImGui_Text(ctx, oque .. ' ' .. seg .. 's' .. pontos)
   else
-    reaper.ImGui_Text(ctx, status)
+    local qual = (MODELO ~= '') and MODELO or 'padrao'
+    reaper.ImGui_Text(ctx, status .. '  |  ' .. qual .. ', "!" usa o forte')
   end
 
   reaper.ImGui_Separator(ctx)

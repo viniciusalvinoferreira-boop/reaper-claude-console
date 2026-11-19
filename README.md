@@ -64,8 +64,28 @@ Funciona pela sua assinatura do Claude Code. **Não usa chave de API nem cobra p
 
 Abra a janelinha pela action. Escreva e aperte **Enter** para enviar; **Shift+Enter** quebra linha.
 
-A primeira resposta demora alguns segundos porque o Claude Code sobe o processo. Com o MCP
-isolado, o tempo medido ficou em torno de 11 segundos por mensagem.
+A janela mostra o que está acontecendo enquanto trabalha, em vez de um contador correndo:
+
+```
+pensando → procurando a ferramenta → lendo o projeto →
+criando faixa → mexendo nos plugins → lendo o projeto
+```
+
+e a resposta vai aparecendo conforme ele escreve.
+
+### Modelo
+
+O padrão é o **Haiku**, porque comando de DAW é curto e objetivo. Para mandar uma mensagem no
+modelo forte, comece ela com `!`. O `!` não vai junto no prompt.
+
+Medido nesta configuração, mesmo comando nos dois modelos:
+
+| Comando | Modelo padrão | Haiku |
+|---|---|---|
+| "quantas faixas tem no projeto" | 8.667 ms | **6.157 ms** |
+| "cria uma faixa REAMP GTR com ReaEQ e ReaComp" | 20.233 ms | **11.606 ms** |
+
+Troque o padrão na variável `MODELO`, no topo do script.
 
 ### A ponte de etiquetas
 
@@ -103,6 +123,18 @@ junto**, e aí o REAPER continua aberto mas fica mudo para todas as ferramentas.
 - **Marcador está preso ao compasso, não ao segundo.** Mudar o tempo move os marcadores no relógio.
 - **Abrir template precisa do prefixo `template:`** no caminho, senão o REAPER abre o arquivo do
   template e um Ctrl+S distraído o sobrescreve.
+- **O gargalo não é o REAPER.** Instrumentando evento por evento, o bridge responde em **190 ms**.
+  O que pesa é a inicialização da sessão e, principalmente, uma chamada de `ToolSearch` que custa
+  **2,4 s** antes de qualquer trabalho, porque o servidor expõe cerca de 190 ferramentas e o
+  harness adia a carga delas. Autorizar a ferramenta pelo nome exato em vez do prefixo **não
+  evita** isso: foi testado.
+- **O processo em si sobe em 127 ms.** Se você for otimizar, não comece pelo boot.
+- **Ler o `out.txt` inteiro a cada frame não escala** depois que `--include-partial-messages`
+  entra: o arquivo passa a ter um evento por pedaço de texto. A janela lê a partir do ponto onde
+  parou e processa só linhas completas.
+- **O texto entre uma ferramenta e outra é narração do raciocínio**, e costuma sair em inglês.
+  Mostrar isso na tela confunde: o texto parcial é zerado a cada ferramenta nova, então sobra só
+  a resposta final.
 
 ## Por que as regras ficam em um arquivo de texto
 
