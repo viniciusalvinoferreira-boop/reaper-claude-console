@@ -143,9 +143,12 @@ end
 if not bridge_vivo() then
   -- preferir disparar como ACTION: assim o bridge vira script independente e
   -- continua vivo mesmo se esta janela for fechada
-  -- esse ID e o hash do caminho Scripts/reaper_mcp_bridge.lua. Se o seu bridge
-  -- estiver em outro lugar, troque pelo seu Command ID. Se nao resolver, o
-  -- fallback abaixo carrega o arquivo direto e funciona do mesmo jeito.
+  -- O Command ID de um ReaScript e "_RS" mais o SHA-1 do NOME do arquivo em
+  -- MAIUSCULAS, sem caminho nenhum: sha1('REAPER_MCP_BRIDGE.LUA') da exatamente
+  -- o id abaixo. Conferido em tres scripts diferentes. Ou seja, este ID vale em
+  -- qualquer maquina que tenha o bridge com esse nome, e voce nao precisa
+  -- descobrir o seu. Se o seu arquivo tiver outro nome, o fallback abaixo
+  -- carrega o arquivo direto e funciona do mesmo jeito.
   local cmd = reaper.NamedCommandLookup('_RS70b9b9e08b3a1b47bef354e4c40290516371e9f9')
   if cmd and cmd ~= 0 then
     reaper.Main_OnCommand(cmd, 0)

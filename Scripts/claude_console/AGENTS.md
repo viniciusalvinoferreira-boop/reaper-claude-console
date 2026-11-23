@@ -46,10 +46,13 @@ ela cria a coisa de verdade e limpa a etiqueta.
 
 **A etiqueta sumir é o recibo de sucesso. Se continuar lá, não deu.**
 
-O Command ID da action está em `COMMAND_ID_DA_PONTE` abaixo. Troque pelo seu: na janela Actions,
-clique com o botão direito no script e escolha "Copy selected action command ID".
+Dispare a action com `run_action_by_name` usando este Command ID:
 
-    COMMAND_ID_DA_PONTE = _RSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    _RSf5cc4c4bf2eb21fb6b3a2b1097fb1a72da9fe6fc
+
+Esse ID **vale em qualquer máquina**, não é só desta instalação: o Command ID de um ReaScript é
+`_RS` mais o SHA-1 do nome do arquivo em maiúsculas, sem caminho. Enquanto o arquivo se chamar
+`ponte_etiquetas.lua`, o ID é esse. Se você renomear o arquivo, o ID muda junto.
 
 ### Saída de hardware, etiqueta no nome da FAIXA
 

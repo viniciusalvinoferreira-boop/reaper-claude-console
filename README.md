@@ -67,12 +67,22 @@ fez o que foi pedido ao pé da letra. Isso é regra escrita no `AGENTS.md`, não
 
 4. **Registre os dois scripts como actions**: janela `Actions` → `New action` → `Load ReaScript`.
 
-5. **Pegue o Command ID da ponte**: na lista de actions, botão direito no `ponte_etiquetas.lua` →
-   `Copy selected action command ID`. Cole no `AGENTS.md`, no lugar de `COMMAND_ID_DA_PONTE`.
-   Sem isso, saída de hardware e mudança de tempo não funcionam.
+5. **Para a janelinha abrir junto com o REAPER** (opcional): use a action
+   `SWS/S&M: Set global startup action`, que pede um Command ID colado, e cole
+   `_RS163977de5a44e4e9ea2b3d7109949c969a4c5972`.
 
-6. **Para a janelinha abrir junto com o REAPER** (opcional): copie o Command ID do
-   `claude_reaper.lua` e use a action `SWS/S&M: Set global startup action`, que pede o ID colado.
+**Você não precisa descobrir nenhum Command ID.** O Command ID de um ReaScript é `_RS` mais o
+SHA-1 do **nome do arquivo em maiúsculas**, sem caminho, então ele é o mesmo em qualquer máquina
+que use esses nomes:
+
+| Arquivo | Command ID |
+|---|---|
+| `ponte_etiquetas.lua` | `_RSf5cc4c4bf2eb21fb6b3a2b1097fb1a72da9fe6fc` |
+| `claude_reaper.lua` | `_RS163977de5a44e4e9ea2b3d7109949c969a4c5972` |
+| `reaper_mcp_bridge.lua` | `_RS70b9b9e08b3a1b47bef354e4c40290516371e9f9` |
+
+Esses já vêm preenchidos no `AGENTS.md` e no script. Se você renomear algum arquivo, o ID muda, e
+aí sim precisa copiar o novo pela janela de actions.
 
 ## Como usar
 
@@ -140,6 +150,10 @@ junto**, e aí o REAPER continua aberto mas fica mudo para todas as ferramentas.
 
 ## Coisas que custaram caro para descobrir
 
+- **O Command ID de um ReaScript é `_RS` + SHA-1 do NOME do arquivo em maiúsculas**, sem caminho
+  nenhum. Conferido batendo o hash contra três scripts registrados. Isso quer dizer que o ID é o
+  mesmo em toda máquina que use aquele nome de arquivo, e que renomear o arquivo troca o ID.
+  Antes eu tinha escrito aqui que vinha do caminho; estava errado.
 - **Erro de Lua em script disparado pelo MCP mata o bridge.** O REAPER segue respondendo e tudo dá
   timeout, inclusive leitura. A recuperação é fechar e reabrir a janelinha, que sobe o bridge pelo
   heartbeat. Por isso a ponte roda inteira em `pcall`.
